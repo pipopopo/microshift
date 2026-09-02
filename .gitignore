@@ -1,0 +1,5 @@
+pull-secret.json
+config.json
+output/
+*.qcow2
+*.iso

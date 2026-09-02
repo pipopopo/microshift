@@ -1,0 +1,149 @@
+FROM registry.redhat.io/openshift4/microshift-bootc-rhel9:v4.22
+
+ARG USHIFT_VER=4.22
+RUN dnf config-manager \
+        --set-enabled rhocp-${USHIFT_VER}-for-rhel-9-$(uname -m)-rpms \
+        --set-enabled fast-datapath-for-rhel-9-$(uname -m)-rpms
+
+RUN dnf install -y \
+        bash-completion \
+        bind-utils \
+        chrony \
+        curl \
+        ethtool \
+        firewalld \
+        iperf3 \
+        iproute \
+        jq \
+        lsof \
+        mtr \
+        NetworkManager-tui \
+        nmap-ncat \
+        openssh-server \
+        pciutils \
+        podman \
+        rsync \
+        skopeo \
+        sos \
+        sysstat \
+        tcpdump \
+        tmux \
+        traceroute \
+        usbutils \
+        openssh-clients \
+        sudo \
+        vim-enhanced \
+        wget \
+        microshift-olm \
+        microshift-observability \
+        microshift-multus \
+        microshift-release-info \
+        microshift-olm-release-info \
+        microshift-multus-release-info && \
+    dnf clean all
+
+ARG VM_USER=kenny
+RUN useradd -m -G wheel ${VM_USER}
+RUN echo "${VM_USER}:${VM_USER}" | chpasswd
+RUN mkdir -p /home/${VM_USER}/.ssh
+RUN echo "${VM_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${VM_USER}
+
+RUN systemctl enable \
+        microshift \
+        NetworkManager \
+        sshd \
+        chronyd
+
+RUN systemctl enable microshift-observability
+
+RUN mkdir -p /var/lib/microshift
+RUN mkdir -p /var/lib/kubelet
+RUN mkdir -p /etc/crio
+
+COPY --chmod=0600 pull-secret.json /var/lib/microshift/pull-secret.json
+COPY --chmod=0600 pull-secret.json /etc/crio/openshift-pull-secret
+COPY --chmod=0600 pull-secret.json /var/lib/kubelet/pull-secret.json
+
+ENV IMAGE_STORAGE_DIR=/usr/lib/containers/storage
+ENV IMAGE_LIST_FILE=${IMAGE_STORAGE_DIR}/image-list.txt
+
+COPY --chmod=0755 embed-images.sh /tmp/embed-images.sh
+
+ARG RELEASE_DIR=/usr/share/microshift/release
+ARG ARCH_SUFFIX=x86_64
+
+RUN --mount=type=secret,id=pullsecret,dst=/run/secrets/pull-secret.json \
+    /tmp/embed-images.sh /run/secrets/pull-secret.json ${RELEASE_DIR}/release-${ARCH_SUFFIX}.json
+RUN --mount=type=secret,id=pullsecret,dst=/run/secrets/pull-secret.json \
+    /tmp/embed-images.sh /run/secrets/pull-secret.json ${RELEASE_DIR}/release-olm-${ARCH_SUFFIX}.json
+RUN --mount=type=secret,id=pullsecret,dst=/run/secrets/pull-secret.json \
+    /tmp/embed-images.sh /run/secrets/pull-secret.json ${RELEASE_DIR}/release-multus-${ARCH_SUFFIX}.json
+
+RUN rm -f /tmp/embed-images.sh
+
+RUN cat > /usr/bin/microshift-copy-images <<'SCRIPT'
+#!/bin/bash
+set -eux -o pipefail
+IMAGE_STORAGE_DIR=/usr/lib/containers/storage
+IMAGE_LIST_FILE=${IMAGE_STORAGE_DIR}/image-list.txt
+if [[ ! -f "${IMAGE_LIST_FILE}" ]]; then
+    echo "No embedded image list found"
+    exit 0
+fi
+echo "Loading embedded container images into CRI-O storage..."
+while IFS="," read -r img sha ; do
+    if [[ -d "${IMAGE_STORAGE_DIR}/${sha}" ]]; then
+        echo "  Loading: ${img}"
+        skopeo copy --preserve-digests \
+            "dir:${IMAGE_STORAGE_DIR}/${sha}" \
+            "containers-storage:${img}"
+    else
+        echo "  WARNING: Cache missing for ${img} (${sha})"
+    fi
+done < "${IMAGE_LIST_FILE}"
+echo "All embedded images loaded"
+SCRIPT
+
+RUN chmod 755 /usr/bin/microshift-copy-images && \
+    mkdir -p /usr/lib/systemd/system/microshift.service.d
+
+RUN cat > /usr/lib/systemd/system/microshift.service.d/microshift-copy-images.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/bin/microshift-copy-images
+EOF
+
+RUN cat > /usr/local/bin/block-internet.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+nft add table inet disconnected
+nft add chain inet disconnected output '{ type filter hook output priority 0 ; policy accept ; }'
+nft add rule inet disconnected output oifname "lo" accept
+nft add rule inet disconnected output ct state established,related accept
+nft add rule inet disconnected output ip daddr 10.0.0.0/8 accept
+nft add rule inet disconnected output ip daddr 172.16.0.0/12 accept
+nft add rule inet disconnected output ip daddr 192.168.0.0/16 accept
+nft add rule inet disconnected output ip daddr 169.254.0.0/16 accept
+nft add rule inet disconnected output ip daddr 224.0.0.0/4 accept
+nft add rule inet disconnected output ip daddr 127.0.0.0/8 accept
+nft add rule inet disconnected output drop
+echo "Outbound internet blocked (disconnected mode)"
+SCRIPT
+RUN chmod +x /usr/local/bin/block-internet.sh
+
+RUN cat > /etc/systemd/system/block-internet.service <<'EOF'
+[Unit]
+Description=Block outbound internet (disconnected simulation)
+After=network-pre.target
+Before=network.target microshift.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/block-internet.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+RUN systemctl enable block-internet.service
+
+RUN bootc container lint
