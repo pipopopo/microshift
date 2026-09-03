@@ -17,6 +17,30 @@ Deploy MicroShift 4.22 VMs on any KVM host using RHEL image mode (bootc). Includ
 | Connected | `deploy.sh` | qcow2 | Standard deployment, pulls images at runtime |
 | Disconnected | `deploy-disconnected.sh` | ISO | All container images embedded, outbound internet blocked via nftables |
 
+### Component profiles (disconnected)
+
+The disconnected Containerfile can be customized to include only the components you need. This directly affects image size and build time.
+
+| Profile | Components | Images | ISO size | Use case |
+|---------|-----------|--------|----------|----------|
+| Core | `microshift` | ~9 | ~3 GB | Minimal control plane, smallest footprint |
+| Standard | Core + OLM + Multus | ~14 | ~5 GB | Typical edge deployment with operator support |
+| Full | Standard + Observability + AI Model Serving | ~34 | ~30 GB | Everything, including AI inference at the edge |
+
+To customize, edit `Containerfile.disconnected`:
+- Add or remove packages from the `dnf install` step (e.g. `microshift-olm`, `microshift-multus`, `microshift-ai-model-serving`)
+- Add or remove the matching `microshift-*-release-info` packages
+- Add or remove the corresponding `embed-images.sh` RUN steps for each release file
+
+Each component has a release info package that provides the image list at `/usr/share/microshift/release/`:
+
+| Component | Package | Release file |
+|-----------|---------|-------------|
+| Core | `microshift-release-info` | `release-x86_64.json` |
+| OLM | `microshift-olm-release-info` | `release-olm-x86_64.json` |
+| Multus | `microshift-multus-release-info` | `release-multus-x86_64.json` |
+| AI Model Serving | `microshift-ai-model-serving-release-info` | `release-ai-model-serving-x86_64.json` |
+
 ## Prerequisites
 
 1. **Pull secret** - Download from https://console.redhat.com/openshift/downloads and save as `pull-secret.json`.
